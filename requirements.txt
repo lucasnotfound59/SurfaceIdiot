@@ -1,0 +1,17 @@
+# SurfaceIdiot - Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Core ML
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Data collection
+pyserial>=3.5
+opencv-python>=4.9.0
+
+# General
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Optional: for visualisation / debugging
+matplotlib>=3.8.0
