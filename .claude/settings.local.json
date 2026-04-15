@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(git add:*)",
-      "Bash(git commit -m ':*)"
+      "Bash(git commit -m ':*)",
+      "Bash(curl -s https://raw.githubusercontent.com/orcahand/orca_core/main/orca_core/models/orcahand_right/config.yaml)",
+      "Bash(curl -s \"https://api.github.com/repos/orcahand/orca_core/contents/orca_core/models\")"
     ]
   }
 }
