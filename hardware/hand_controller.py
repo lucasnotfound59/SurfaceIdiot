@@ -1,31 +1,27 @@
 """
-SurfaceIdiot — 16 DOF 灵巧手控制器（支持部分舵机缺失）
-=========================================================
+SurfaceIdiot — 16 DOF 灵巧手控制器（Orca Hand v1，支持部分舵机缺失）
+======================================================================
 
 将 16 个关节角度映射到 HLS3915M 舵机位置，并通过 TTL 总线同步发送。
 缺失的舵机会被自动跳过，不影响在线舵机的正常控制。
 
-16 DOF 配置（线驱动方案）:
-    拇指  (3 DOF): mcp_flex, mcp_abd, ip
-    食指  (2 DOF): mcp, pip
-    中指  (2 DOF): mcp, pip
-    无名指(2 DOF): mcp, pip
-    小指  (2 DOF): mcp, pip
-    指展开(3 DOF): index_abd, middle_abd, ring_abd   ← 三根横向腱
-    手腕  (2 DOF): flex, abd
+16 DOF 配置（Orca Hand v1，无手腕）:
+    大拇指 (4 DOF) : thumb_abd, thumb_mcp, thumb_pip, thumb_dip   → ID  1-4
+    食指   (3 DOF) : index_abd, index_mcp, index_pip              → ID  5-7
+    中指   (3 DOF) : middle_abd, middle_mcp, middle_pip           → ID  8-10
+    无名指 (3 DOF) : ring_abd, ring_mcp, ring_pip                 → ID 11-13
+    小指   (3 DOF) : pinky_abd, pinky_mcp, pinky_pip              → ID 14-16
 
-部分舵机模式:
-    connect() 时自动 ping 所有 ID，将在线/离线关节分开记录。
-    所有控制命令只下发给在线关节，离线关节静默跳过。
+关节命名与 orca_control.py / ORCA_ROM 完全一致，便于直接对接。
 
 用法:
     from hardware.hand_controller import HandController
 
-    hand = HandController("/dev/tty.usbserial-0001")
+    hand = HandController("/dev/cu.usbmodem5B790315271")
     hand.connect()
     hand.set_neutral()
     hand.set_joint("index_mcp", 60.0)
-    hand.set_all({"index_mcp": 60, "index_pip": 50, "thumb_mcp_flex": 40})
+    hand.set_all({"index_mcp": 60, "index_pip": 50, "thumb_mcp": 40})
     hand.disconnect()
 """
 
@@ -48,47 +44,37 @@ class JointConfig:
     speed:     int   = 300  # 默认运动速度（0=最大，越大越慢）
 
 
-# ─── 16 DOF 关节表 ────────────────────────────────────────────────────────────
-# ⚠️ servo_id、angle_min/max、direction 请在单关节原型测试后根据实际情况校正
-# 参考 ORCA Hand 的 ROM 定义进行初始标定
+# ─── 16 DOF 关节表（Orca Hand v1）────────────────────────────────────────────
+# ROM 范围来自 Orca Hand 官方配置（orca_control.py / ORCA_ROM）
+# ⚠️ direction (+1/-1) 在单关节原型测试后按实际绕线方向校正
 
 JOINT_CONFIG: Dict[str, JointConfig] = {
 
-    # ── 拇指 (3 DOF) ──────────────────────────────────────────────────────────
-    # MCP 屈伸: 0°=伸直, 正=屈曲
-    "thumb_mcp_flex": JointConfig(servo_id=1,  angle_min=0,   angle_max=70,  direction=1),
-    # MCP 内收外展: 负=内收（靠近掌心）, 正=外展
-    "thumb_mcp_abd":  JointConfig(servo_id=2,  angle_min=-30, angle_max=60,  direction=1),
-    # IP 屈伸
-    "thumb_ip":       JointConfig(servo_id=3,  angle_min=0,   angle_max=80,  direction=1),
+    # ── 大拇指 (4 DOF)  ID 1-4 ───────────────────────────────────────────────
+    "thumb_abd": JointConfig(servo_id=1,  angle_min=-30, angle_max=60,  direction=1),
+    "thumb_mcp": JointConfig(servo_id=2,  angle_min=0,   angle_max=90,  direction=1),
+    "thumb_pip": JointConfig(servo_id=3,  angle_min=0,   angle_max=90,  direction=1),
+    "thumb_dip": JointConfig(servo_id=4,  angle_min=0,   angle_max=70,  direction=1),
 
-    # ── 食指 (2 DOF) ──────────────────────────────────────────────────────────
-    "index_mcp":      JointConfig(servo_id=4,  angle_min=0,   angle_max=90,  direction=1),
-    "index_pip":      JointConfig(servo_id=5,  angle_min=0,   angle_max=90,  direction=1),
+    # ── 食指 (3 DOF)  ID 5-7 ─────────────────────────────────────────────────
+    "index_abd": JointConfig(servo_id=5,  angle_min=-20, angle_max=20,  direction=1),
+    "index_mcp": JointConfig(servo_id=6,  angle_min=0,   angle_max=90,  direction=1),
+    "index_pip": JointConfig(servo_id=7,  angle_min=0,   angle_max=90,  direction=1),
 
-    # ── 中指 (2 DOF) ──────────────────────────────────────────────────────────
-    "middle_mcp":     JointConfig(servo_id=6,  angle_min=0,   angle_max=90,  direction=1),
-    "middle_pip":     JointConfig(servo_id=7,  angle_min=0,   angle_max=90,  direction=1),
+    # ── 中指 (3 DOF)  ID 8-10 ────────────────────────────────────────────────
+    "middle_abd": JointConfig(servo_id=8,  angle_min=-20, angle_max=20, direction=1),
+    "middle_mcp": JointConfig(servo_id=9,  angle_min=0,   angle_max=90, direction=1),
+    "middle_pip": JointConfig(servo_id=10, angle_min=0,   angle_max=90, direction=1),
 
-    # ── 无名指 (2 DOF) ────────────────────────────────────────────────────────
-    "ring_mcp":       JointConfig(servo_id=8,  angle_min=0,   angle_max=90,  direction=1),
-    "ring_pip":       JointConfig(servo_id=9,  angle_min=0,   angle_max=90,  direction=1),
+    # ── 无名指 (3 DOF)  ID 11-13 ─────────────────────────────────────────────
+    "ring_abd": JointConfig(servo_id=11, angle_min=-20, angle_max=20,   direction=1),
+    "ring_mcp": JointConfig(servo_id=12, angle_min=0,   angle_max=90,   direction=1),
+    "ring_pip": JointConfig(servo_id=13, angle_min=0,   angle_max=90,   direction=1),
 
-    # ── 小指 (2 DOF) ──────────────────────────────────────────────────────────
-    "pinky_mcp":      JointConfig(servo_id=10, angle_min=0,   angle_max=90,  direction=1),
-    "pinky_pip":      JointConfig(servo_id=11, angle_min=0,   angle_max=90,  direction=1),
-
-    # ── 指展开 (3 DOF) — 横向腱，控制相邻手指间距 ────────────────────────────
-    # 负=手指靠拢, 正=展开
-    "index_abd":      JointConfig(servo_id=12, angle_min=-20, angle_max=20,  direction=1),
-    "middle_abd":     JointConfig(servo_id=13, angle_min=-20, angle_max=20,  direction=1),
-    "ring_abd":       JointConfig(servo_id=14, angle_min=-20, angle_max=20,  direction=1),
-
-    # ── 手腕 (2 DOF) ──────────────────────────────────────────────────────────
-    # flex: 负=背屈, 正=掌屈
-    "wrist_flex":     JointConfig(servo_id=15, angle_min=-30, angle_max=30,  direction=1),
-    # abd:  负=桡偏, 正=尺偏
-    "wrist_abd":      JointConfig(servo_id=16, angle_min=-20, angle_max=20,  direction=1),
+    # ── 小指 (3 DOF)  ID 14-16 ───────────────────────────────────────────────
+    "pinky_abd": JointConfig(servo_id=14, angle_min=-20, angle_max=20,  direction=1),
+    "pinky_mcp": JointConfig(servo_id=15, angle_min=0,   angle_max=90,  direction=1),
+    "pinky_pip": JointConfig(servo_id=16, angle_min=0,   angle_max=90,  direction=1),
 }
 
 ALL_JOINT_NAMES = list(JOINT_CONFIG.keys())
@@ -101,26 +87,22 @@ PRESET_POSES: Dict[str, Dict[str, float]] = {
     "neutral": {k: 0.0 for k in ALL_JOINT_NAMES},
 
     "fist": {
-        "thumb_mcp_flex": 60, "thumb_mcp_abd": 20, "thumb_ip": 60,
-        "index_mcp": 80,  "index_pip": 80,
-        "middle_mcp": 80, "middle_pip": 80,
-        "ring_mcp": 80,   "ring_pip": 80,
-        "pinky_mcp": 80,  "pinky_pip": 80,
-        "index_abd": 0, "middle_abd": 0, "ring_abd": 0,
-        "wrist_flex": 0, "wrist_abd": 0,
+        "thumb_abd": 20,  "thumb_mcp": 60,  "thumb_pip": 60,  "thumb_dip": 50,
+        "index_abd": 0,   "index_mcp": 80,  "index_pip": 80,
+        "middle_abd": 0,  "middle_mcp": 80, "middle_pip": 80,
+        "ring_abd": 0,    "ring_mcp": 80,   "ring_pip": 80,
+        "pinky_abd": 0,   "pinky_mcp": 80,  "pinky_pip": 80,
     },
 
     "pinch": {  # 拇食指捏握（捏笔/薄片）
-        "thumb_mcp_flex": 35, "thumb_mcp_abd": 30, "thumb_ip": 30,
-        "index_mcp": 50,  "index_pip": 40,
-        "middle_mcp": 70, "middle_pip": 70,
-        "ring_mcp": 75,   "ring_pip": 75,
-        "pinky_mcp": 75,  "pinky_pip": 75,
-        "index_abd": -10, "middle_abd": 0, "ring_abd": 0,
-        "wrist_flex": 0,  "wrist_abd": 0,
+        "thumb_abd": 30,  "thumb_mcp": 35,  "thumb_pip": 30,  "thumb_dip": 20,
+        "index_abd": -10, "index_mcp": 50,  "index_pip": 40,
+        "middle_abd": 0,  "middle_mcp": 70, "middle_pip": 70,
+        "ring_abd": 0,    "ring_mcp": 75,   "ring_pip": 75,
+        "pinky_abd": 0,   "pinky_mcp": 75,  "pinky_pip": 75,
     },
 
-    "open": {k: 0.0 for k in ALL_JOINT_NAMES},  # 完全展开
+    "open": {k: 0.0 for k in ALL_JOINT_NAMES},
 }
 
 

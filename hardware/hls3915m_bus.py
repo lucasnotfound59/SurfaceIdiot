@@ -264,13 +264,17 @@ class HLSBus:
     # ── 基础指令 ──────────────────────────────────────────────────────────────
 
     def ping(self, servo_id: int) -> bool:
-        """检查舵机是否在线。"""
+        """检查舵机是否在线。有响应即视为在线（即使舵机返回错误状态字节）。"""
         try:
             pkt = self._build_packet(servo_id, INST_PING, b"")
             self._send(pkt)
             self._recv_status()
             return True
+        except ServoError:
+            # 舵机响应了，只是报告了自身错误（如过压），仍视为在线
+            return True
         except CommError:
+            # 真正没有响应（超时/校验错误）
             return False
 
     def read(self, servo_id: int, start_addr: int, length: int) -> bytes:
@@ -287,7 +291,12 @@ class HLSBus:
         pkt    = self._build_packet(servo_id, INST_WRITE, params)
         self._send(pkt)
         if servo_id != BROADCAST_ID:
-            self._recv_status()
+            try:
+                self._recv_status()
+            except ServoError:
+                # 写入可能成功，舵机只是在状态包里顺带报了硬件告警（如过压）
+                # 不抛出，让调用方继续
+                pass
 
     def sync_write(
         self,

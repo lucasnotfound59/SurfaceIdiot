@@ -27,6 +27,7 @@ MediaPipe → HandController 关节名称映射（15/16 DOF）:
 
 import argparse
 import os
+import signal
 import sys
 import time
 import urllib.request
@@ -60,23 +61,24 @@ HAND_CONNECTIONS = [
     (13,17),(0,17),(17,18),(18,19),(19,20),
 ]
 
-# ── 关节显示顺序 & 标签（HUD 用）─────────────────────────────────────────────
+# ── Joint display order & labels (Orca Hand v1) ───────────────────────────────
 JOINT_DISPLAY = [
-    ("thumb_mcp_flex", "拇指 MCP屈"),
-    ("thumb_mcp_abd",  "拇指 外展"),
-    ("thumb_ip",       "拇指 IP"),
-    ("index_mcp",      "食指 MCP"),
-    ("index_pip",      "食指 PIP"),
-    ("middle_mcp",     "中指 MCP"),
-    ("middle_pip",     "中指 PIP"),
-    ("ring_mcp",       "无名 MCP"),
-    ("ring_pip",       "无名 PIP"),
-    ("pinky_mcp",      "小指 MCP"),
-    ("pinky_pip",      "小指 PIP"),
-    ("index_abd",      "食指 展开"),
-    ("middle_abd",     "中指 展开"),
-    ("ring_abd",       "无名 展开"),
-    ("wrist_flex",     "手腕 屈伸"),
+    ("thumb_abd",  "Th.Abd "),   # ID 1
+    ("thumb_mcp",  "Th.MCP "),   # ID 2
+    ("thumb_pip",  "Th.PIP "),   # ID 3
+    ("thumb_dip",  "Th.DIP "),   # ID 4
+    ("index_abd",  "Idx.Abd"),   # ID 5
+    ("index_mcp",  "Idx.MCP"),   # ID 6
+    ("index_pip",  "Idx.PIP"),   # ID 7
+    ("middle_abd", "Mid.Abd"),   # ID 8
+    ("middle_mcp", "Mid.MCP"),   # ID 9
+    ("middle_pip", "Mid.PIP"),   # ID 10
+    ("ring_abd",   "Rng.Abd"),   # ID 11
+    ("ring_mcp",   "Rng.MCP"),   # ID 12
+    ("ring_pip",   "Rng.PIP"),   # ID 13
+    ("pinky_abd",  "Pky.Abd"),   # ID 14
+    ("pinky_mcp",  "Pky.MCP"),   # ID 15
+    ("pinky_pip",  "Pky.PIP"),   # ID 16
 ]
 
 # ─── 数学工具（从 orca_control.py 复用）──────────────────────────────────────
@@ -105,7 +107,8 @@ def _remap(v, src_min, src_max, dst_min, dst_max) -> float:
 
 def landmarks_to_hls(lm) -> dict:
     """
-    将 MediaPipe 21 个地标转换为 HandController 的关节角度字典（单位：度）。
+    将 MediaPipe 21 个地标转换为 Orca Hand v1 关节角度字典（单位：度）。
+    关节名与 ORCA_ROM / HandController.JOINT_CONFIG 完全一致。
 
     MediaPipe 地标索引:
       手腕=0
@@ -123,37 +126,33 @@ def landmarks_to_hls(lm) -> dict:
         return _remap(_angle3(pt(a), pt(b), pt(c)), src[0], src[1], 0, 90)
 
     joints = {
-        # 拇指（拇指轴方向特殊，范围稍小）
-        "thumb_mcp_flex": flex(1, 2, 3, src=(150, 30)),
-        "thumb_ip":        flex(2, 3, 4, src=(170, 60)),
+        # 大拇指（4 DOF）— 拇指轴方向特殊，屈伸范围稍小
+        "thumb_mcp": flex(1, 2, 3, src=(150, 30)),
+        "thumb_pip": flex(2, 3, 4, src=(170, 60)),
+        "thumb_dip": flex(2, 3, 4, src=(170, 60)),  # MediaPipe 无 DIP，用 IP 近似
 
-        # 四指屈伸
-        "index_mcp":  flex(5,  6,  7),
-        "index_pip":  flex(6,  7,  8),
+        # 食指（3 DOF）
+        "index_mcp": flex(5,  6,  7),
+        "index_pip": flex(6,  7,  8),
+
+        # 中指（3 DOF）
         "middle_mcp": flex(9,  10, 11),
         "middle_pip": flex(10, 11, 12),
-        "ring_mcp":   flex(13, 14, 15),
-        "ring_pip":   flex(14, 15, 16),
-        "pinky_mcp":  flex(17, 18, 19),
-        "pinky_pip":  flex(18, 19, 20),
 
-        # 手指外展（相邻 MCP 之间夹角）
-        "thumb_mcp_abd": _remap(_abduction(lm, 0,  2,  5), -40, 40, -30, 60),
-        "index_abd":     _remap(_abduction(lm, 0,  5,  9), -30, 30, -20, 20),
-        "middle_abd":    _remap(_abduction(lm, 0,  9, 13), -30, 30, -20, 20),
-        "ring_abd":      _remap(_abduction(lm, 0, 13, 17), -30, 30, -20, 20),
+        # 无名指（3 DOF）
+        "ring_mcp": flex(13, 14, 15),
+        "ring_pip": flex(14, 15, 16),
 
-        # 手腕屈伸（手腕→中指MCP向量相对竖直轴的偏角）
-        "wrist_flex": _remap(
-            float(np.degrees(np.arctan2(
-                lm[9].x - lm[0].x,
-                -(lm[9].y - lm[0].y),
-            ))),
-            -45, 45, -30, 30,
-        ),
+        # 小指（3 DOF）
+        "pinky_mcp": flex(17, 18, 19),
+        "pinky_pip": flex(18, 19, 20),
 
-        # wrist_abd 暂无可靠的 MediaPipe 数据源，保持中立
-        "wrist_abd": 0.0,
+        # 外展角（所有手指，含小指）
+        "thumb_abd":  _remap(_abduction(lm, 0,  2,  5), -40, 40, -30, 60),
+        "index_abd":  _remap(_abduction(lm, 0,  5,  9), -30, 30, -20, 20),
+        "middle_abd": _remap(_abduction(lm, 0,  9, 13), -30, 30, -20, 20),
+        "ring_abd":   _remap(_abduction(lm, 0, 13, 17), -30, 30, -20, 20),
+        "pinky_abd":  _remap(_abduction(lm, 0, 17, 20), -30, 30, -20, 20),
     }
     return joints
 
@@ -233,15 +232,19 @@ def draw_joint_hud(frame, joints: dict, online_set: set | None = None):
 
 
 def _joint_range(jname: str):
-    """返回关节 (min, max) 角度范围（用于进度条归一化）。"""
+    """返回关节 (min, max) 角度范围（用于进度条归一化，与 Orca Hand v1 ROM 一致）。"""
     _ranges = {
-        "thumb_mcp_flex": (0, 70), "thumb_mcp_abd": (-30, 60), "thumb_ip": (0, 80),
-        "index_mcp":  (0, 90), "index_pip":  (0, 90),
-        "middle_mcp": (0, 90), "middle_pip": (0, 90),
-        "ring_mcp":   (0, 90), "ring_pip":   (0, 90),
-        "pinky_mcp":  (0, 90), "pinky_pip":  (0, 90),
-        "index_abd":  (-20, 20), "middle_abd": (-20, 20), "ring_abd": (-20, 20),
-        "wrist_flex": (-30, 30), "wrist_abd":  (-20, 20),
+        # 大拇指
+        "thumb_abd": (-30, 60), "thumb_mcp": (0, 90),
+        "thumb_pip": (0, 90),   "thumb_dip": (0, 70),
+        # 食指
+        "index_abd": (-20, 20), "index_mcp": (0, 90), "index_pip": (0, 90),
+        # 中指
+        "middle_abd": (-20, 20), "middle_mcp": (0, 90), "middle_pip": (0, 90),
+        # 无名指
+        "ring_abd": (-20, 20), "ring_mcp": (0, 90), "ring_pip": (0, 90),
+        # 小指
+        "pinky_abd": (-20, 20), "pinky_mcp": (0, 90), "pinky_pip": (0, 90),
     }
     return _ranges.get(jname, (0, 90))
 
@@ -249,11 +252,11 @@ def _joint_range(jname: str):
 def draw_fps_bar(frame, fps: float, n_online: int | None, n_total: int):
     h, w = frame.shape[:2]
     if n_online is None:
-        hw_str = "mock 模式"
+        hw_str = "mock mode"
     else:
-        hw_str = f"舵机 {n_online}/{n_total} 在线"
+        hw_str = f"servos {n_online}/{n_total} online"
     cv2.putText(frame,
-                f"FPS: {fps:.0f}   {hw_str}   Q=退出  N=中立位",
+                f"FPS:{fps:.0f}  {hw_str}  Ctrl+C=quit  N=neutral  R=rescan",
                 (10, h - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
 
@@ -261,8 +264,8 @@ def draw_fps_bar(frame, fps: float, n_online: int | None, n_total: int):
 
 def main():
     parser = argparse.ArgumentParser(description="MediaPipe → HLS3915M 灵巧手控制")
-    parser.add_argument("--port",   default="/dev/tty.usbserial-0001",
-                        help="舵机总线串口（macOS: /dev/tty.usbserial-XXXX）")
+    parser.add_argument("--port",   default="/dev/cu.usbmodem5B790315271",
+                        help="舵机总线串口（macOS: /dev/cu.usbmodem... 用 tools/portFinder.py 查询）")
     parser.add_argument("--baud",   type=int, default=1_000_000)
     parser.add_argument("--cam",    type=int, default=0,   help="摄像头索引")
     parser.add_argument("--alpha",  type=float, default=0.35,
@@ -274,6 +277,13 @@ def main():
     parser.add_argument("--echo",   action="store_true",
                         help="启用 echo（3 线半双工接法）")
     args = parser.parse_args()
+
+    # ── Ctrl+C in terminal → clean shutdown ───────────────────────────────────
+    _running = [True]
+    def _sig_handler(sig, frame):
+        print("\n[Ctrl+C] Shutting down...")
+        _running[0] = False
+    signal.signal(signal.SIGINT, _sig_handler)
 
     # ── 初始化硬件 ────────────────────────────────────────────────────────────
     hand = None
@@ -318,11 +328,11 @@ def main():
 
     n_total = 16  # 本项目最终目标 16 DOF
 
-    print("\n启动完成，按 Q 退出，按 N 让机械手回中立位\n")
+    print("\nReady.  Q (in camera window) or Ctrl+C (terminal) to quit.  N = neutral.\n")
 
     try:
         with vision.HandLandmarker.create_from_options(det_opts) as detector:
-            while cap.isOpened():
+            while cap.isOpened() and _running[0]:
                 ret, frame = cap.read()
                 if not ret:
                     break
@@ -349,9 +359,9 @@ def main():
                     if hand is not None:
                         hand.set_all(smooth_joints, speed=args.speed)
                 else:
-                    cv2.putText(frame, "未检测到手部",
-                                (50, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                                1.2, (0, 80, 255), 2)
+                    cv2.putText(frame, "No hand detected",
+                            (50, 60), cv2.FONT_HERSHEY_SIMPLEX,
+                            1.2, (0, 80, 255), 2)
 
                 # ── HUD ────────────────────────────────────────────────────
                 draw_joint_hud(frame, last_joints, online_set)
@@ -359,7 +369,7 @@ def main():
                              len(online_set) if online_set is not None else None,
                              n_total)
 
-                cv2.imshow("SurfaceIdiot — MediaPipe → HLS3915M", frame)
+                cv2.imshow("SurfaceIdiot | MediaPipe -> HLS3915M", frame)
 
                 # ── 按键处理 ───────────────────────────────────────────────
                 key = cv2.waitKey(1) & 0xFF
@@ -378,14 +388,14 @@ def main():
                 t_prev = t_now
                 frame_idx += 1
 
-    except KeyboardInterrupt:
-        print("\n中断")
+    except Exception as e:
+        print(f"\n[Error] {e}")
     finally:
         cap.release()
         cv2.destroyAllWindows()
         if hand is not None:
             hand.disconnect()
-        print("退出")
+        print("Exited.")
 
 
 if __name__ == "__main__":
