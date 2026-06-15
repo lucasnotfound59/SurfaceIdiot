@@ -26,59 +26,28 @@ SurfaceIdiot — 16 DOF 灵巧手控制器（Orca Hand v1，支持部分舵机�
 """
 
 import time
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from hardware.hls3915m_bus import HLSBus, deg_to_pos, pos_to_deg, CommError
+from hardware.hls3915m_bus import (
+    HLSBus, deg_to_pos, pos_to_deg, CommError,
+    UNITS_PER_DEG, CENTER_POS,
+)
+from hardware.calibration import load_offsets
 
 # ─── 关节配置 ─────────────────────────────────────────────────────────────────
+# 舵机 ↔ 自由度 映射统一在 hardware/joint_map.py 中维护（唯一可编辑来源）。
+# 这里 re-export，保持对外接口不变。
 
-@dataclass
-class JointConfig:
-    """单个关节的完整描述。"""
-    servo_id:  int          # 舵机 ID（总线地址）
-    angle_min: float        # 最小允许角度 (°)
-    angle_max: float        # 最大允许角度 (°)
-    direction: int  = 1     # +1 或 -1（根据绕线方向）
-    neutral:   float = 0.0  # 中立位角度 (°)
-    speed:     int   = 300  # 默认运动速度（0=最大，越大越慢）
-
-
-# ─── 16 DOF 关节表（Orca Hand v1）────────────────────────────────────────────
-# ROM 范围来自 Orca Hand 官方配置（orca_control.py / ORCA_ROM）
-# ⚠️ direction (+1/-1) 在单关节原型测试后按实际绕线方向校正
-
-JOINT_CONFIG: Dict[str, JointConfig] = {
-
-    # ── 大拇指 (4 DOF)  ID 1-4 ───────────────────────────────────────────────
-    "thumb_abd": JointConfig(servo_id=1,  angle_min=-30, angle_max=60,  direction=1),
-    "thumb_mcp": JointConfig(servo_id=2,  angle_min=0,   angle_max=90,  direction=1),
-    "thumb_pip": JointConfig(servo_id=3,  angle_min=0,   angle_max=90,  direction=1),
-    "thumb_dip": JointConfig(servo_id=4,  angle_min=0,   angle_max=70,  direction=1),
-
-    # ── 食指 (3 DOF)  ID 5-7 ─────────────────────────────────────────────────
-    "index_abd": JointConfig(servo_id=5,  angle_min=-20, angle_max=20,  direction=1),
-    "index_mcp": JointConfig(servo_id=6,  angle_min=0,   angle_max=90,  direction=1),
-    "index_pip": JointConfig(servo_id=7,  angle_min=0,   angle_max=90,  direction=1),
-
-    # ── 中指 (3 DOF)  ID 8-10 ────────────────────────────────────────────────
-    "middle_abd": JointConfig(servo_id=8,  angle_min=-20, angle_max=20, direction=1),
-    "middle_mcp": JointConfig(servo_id=9,  angle_min=0,   angle_max=90, direction=1),
-    "middle_pip": JointConfig(servo_id=10, angle_min=0,   angle_max=90, direction=1),
-
-    # ── 无名指 (3 DOF)  ID 11-13 ─────────────────────────────────────────────
-    "ring_abd": JointConfig(servo_id=11, angle_min=-20, angle_max=20,   direction=1),
-    "ring_mcp": JointConfig(servo_id=12, angle_min=0,   angle_max=90,   direction=1),
-    "ring_pip": JointConfig(servo_id=13, angle_min=0,   angle_max=90,   direction=1),
-
-    # ── 小指 (3 DOF)  ID 14-16 ───────────────────────────────────────────────
-    "pinky_abd": JointConfig(servo_id=14, angle_min=-20, angle_max=20,  direction=1),
-    "pinky_mcp": JointConfig(servo_id=15, angle_min=0,   angle_max=90,  direction=1),
-    "pinky_pip": JointConfig(servo_id=16, angle_min=0,   angle_max=90,  direction=1),
-}
-
-ALL_JOINT_NAMES = list(JOINT_CONFIG.keys())
-ALL_SERVO_IDS   = [cfg.servo_id for cfg in JOINT_CONFIG.values()]
+from hardware.joint_map import (
+    JointConfig,
+    JOINT_CONFIG,
+    ALL_JOINT_NAMES,
+    ALL_SERVO_IDS,
+    ID_TO_JOINT,
+    JOINT_TO_ID,
+    FINGERS,
+    FLEX_JOINTS,
+)
 
 
 # ─── 预设手型 ─────────────────────────────────────────────────────────────────
@@ -136,6 +105,18 @@ class HandController:
         # 在线/离线关节集合（connect 后填充）
         self._online:  set = set()   # 已检测到的关节名
         self._offline: set = set()   # ping 无响应的关节名
+        # 零位校准：{关节名: home_raw_position}，0° 对应该位置（缺省 2048 中点）
+        self._home: Dict[str, int] = load_offsets()
+        if self._home:
+            print(f"[Hand] 已加载零位校准（{len(self._home)} 个关节）")
+
+    def reload_calibration(self):
+        """重新读取零位校准文件（reset_zero 后无需重启即可生效）。"""
+        self._home = load_offsets()
+
+    def _home_pos(self, joint_name: str) -> int:
+        """该关节 0° 对应的舵机原始位置（有校准用校准，否则用出厂中点）。"""
+        return self._home.get(joint_name, CENTER_POS)
 
     # ── 在线检测 ──────────────────────────────────────────────────────────────
 
@@ -222,19 +203,23 @@ class HandController:
     # ── 角度转换 ──────────────────────────────────────────────────────────────
 
     def _angle_to_pos(self, joint_name: str, angle_deg: float) -> int:
-        """将关节角度 (°) 转换为舵机原始位置值，考虑 direction。"""
+        """
+        将关节角度 (°) 转换为舵机原始位置值。
+        以「零位校准位置」为 0° 原点（未校准则用出厂中点 2048）。
+        """
         cfg = JOINT_CONFIG[joint_name]
         # 限位保护
         angle_deg = max(cfg.angle_min, min(cfg.angle_max, angle_deg))
-        # 以 neutral 对应 CENTER_POS（2048）为原点
-        neutral_offset = cfg.neutral * cfg.direction
-        pos = deg_to_pos((angle_deg - cfg.neutral) * cfg.direction)
+        base  = self._home_pos(joint_name)
+        delta = (angle_deg - cfg.neutral) * cfg.direction * UNITS_PER_DEG
+        pos   = int(round(base + delta))
         return max(0, min(4095, pos))
 
     def _pos_to_angle(self, joint_name: str, position: int) -> float:
-        """将舵机位置值转换回关节角度 (°)。"""
+        """将舵机位置值转换回关节角度 (°)，以零位校准位置为原点。"""
         cfg = JOINT_CONFIG[joint_name]
-        raw_deg = pos_to_deg(position)
+        base    = self._home_pos(joint_name)
+        raw_deg = (position - base) / UNITS_PER_DEG
         return raw_deg * cfg.direction + cfg.neutral
 
     # ── 单关节控制 ────────────────────────────────────────────────────────────

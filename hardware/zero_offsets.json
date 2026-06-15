@@ -1,0 +1,25 @@
+{
+  "home": {
+    "thumb_abd": 390,
+    "thumb_mcp": 2263,
+    "thumb_dip": 7,
+    "middle_abd": 2098,
+    "middle_mcp": 2252,
+    "middle_pip": 809,
+    "pinky_abd": 2477,
+    "pinky_mcp": 1208
+  },
+  "meta": {
+    "note": "home = 该关节 0°(伸直/居中) 对应的舵机原始位置",
+    "joints": {
+      "thumb_abd": 12,
+      "thumb_mcp": 9,
+      "thumb_dip": 11,
+      "middle_abd": 4,
+      "middle_mcp": 3,
+      "middle_pip": 5,
+      "pinky_abd": 13,
+      "pinky_mcp": 14
+    }
+  }
+}
